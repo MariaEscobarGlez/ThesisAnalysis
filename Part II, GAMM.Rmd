@@ -1,0 +1,1370 @@
+---
+title: "Part II: GAMM"
+author: "María Escobar-González"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 6
+    toc_float: true
+    collapsed: true
+    smooth_scroll: true
+    highlight: kate
+    theme: journal 
+    df_print: paged
+    code_folding: show
+date: "2025-07-10"
+---
+
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+# Load packages
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(mgcv)
+library(nlme)
+library(DHARMa)
+library(mgcViz)
+library(car)
+library(lmtest)
+library(tibble)
+library(conflicted)
+library(patchwork)
+library(reshape2)
+```
+
+## Load and prepare data
+```{r message=FALSE, warning=FALSE, rows.print = 24}
+load("cnp_lin_interpol.RData")  # cnp
+load("park_lin_interpol.RData") # park
+incidencias <- read.delim("incidences.txt", header = TRUE, sep = "\t", dec = ".")
+
+any(is.na(cnp))
+any(is.na(park))
+any(is.na(incidencias))
+```
+
+## GAMM: Wild boar urban presence
+```{r message=FALSE, warning=FALSE, rows.print = 24}
+gamm_inc <- gamm(
+  Incidence ~ s(Month, bs = "cc", k = 12),
+  random = list(Year = ~1),
+  family = poisson(link = "log"),
+  data = incidencias,
+  method = "REML"
+)
+
+summary(gamm_inc$gam)
+summary(gamm_inc$lme)
+
+```
+
+```{r message=FALSE, warning=FALSE, rows.print = 24}
+## Model Validation ##
+
+gam.check(gamm_inc$gam)  # Residual diagnostics
+hist(residuals(gamm_inc$gam, type = "deviance"), main = "Histogram of Residuals")
+
+# Compute standardized residuals
+incidencias <- incidencias %>%
+  mutate(
+    pred_inc = predict(gamm_inc$gam, type = "response"),  # Predictions
+    sd_res_inc = residuals(gamm_inc$gam, type = "deviance") / 
+      sd(residuals(gamm_inc$gam, type = "deviance"), na.rm = TRUE)  # Standardized residuals
+  )
+
+# Q-Q Plot of Residuals with QQ Line
+qqPlot(residuals(gamm_inc$gam, type = "deviance"),
+       main = "Q-Q Plot of Deviance Residuals",
+       pch = 19)  # Plot residuals
+
+
+# Observed vs. Predicted
+ggplot(incidencias, aes(x = Month, y = Incidence)) +
+  geom_point(alpha = 0.6) +
+  geom_line(aes(y = pred_inc), col = "blue", size = 1) +
+  labs(x = "Month", y = "Incidences", title = "Observed vs Predicted Incidences") +
+  theme_minimal()
+
+# Overdispersion check
+overdispersion <- sum(residuals(gamm_inc$gam, type = "deviance")^2) /
+  (nrow(incidencias) - length(coef(gamm_inc$gam)))
+overdispersion
+
+```
+
+```{r message=FALSE, warning=FALSE, rows.print = 24}
+#Model validation failed. We have to consider a Negative Binomial model
+
+nb_bam_month_inc <- bam(
+  Incidence ~ s(Month, bs = "cc", k = 12) + s(Year, bs = "re"),
+  family = nb(),
+  data = incidencias,
+  method = "fREML",
+  discrete = TRUE,
+  AR.start = incidencias$Year == min(incidencias$Year)
+)
+
+# Predicted values and residuals
+incidencias <- incidencias |>
+  mutate(
+    pred_inc = predict(nb_bam_month_inc, type = "response"),
+    res_inc = Incidence - pred_inc,
+    pearson_res = res_inc / sqrt(pred_inc)
+  )
+
+```
+
+
+```{r message=FALSE, warning=FALSE, rows.print = 24}
+#Model validation Negative Binomial
+
+library(DHARMa)
+library(mgcViz)
+library(lmtest)
+library(car)
+
+
+# 1. Compute predicted incidences (response scale)
+incidencias$pred_inc <- predict(nb_bam_month_inc, newdata = incidencias, type = "response")
+
+# Compute residuals
+incidencias$res_inc <- incidencias$Incidence - incidencias$pred_inc  # Raw residuals
+incidencias$pearson_res <- incidencias$res_inc / sqrt(incidencias$pred_inc)  # Pearson residuals
+
+# Residuals vs. Fitted Values
+ggplot(incidencias, aes(x = pred_inc, y = res_inc)) +
+  geom_point(alpha = 0.6) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  labs(title = "Residuals vs. Fitted Values",
+       x = "Predicted Incidences",
+       y = "Residuals") +
+  theme_minimal()
+
+# 2. Normality of Residuals (NB doesn't assume normality, but check residual distribution)
+ggplot(incidencias, aes(x = res_inc)) +
+  geom_histogram(binwidth = 10, fill = "skyblue", color = "black", alpha = 0.7) +
+  labs(title = "Histogram of Residuals",
+       x = "Residuals",
+       y = "Frequency") +
+  theme_minimal()
+
+# Shapiro-Wilk test & QQ-plot (not crucial for NB, but included)
+shapiro.test(incidencias$res_inc)
+
+#shapiro: Residuals are not normally distributed, but NB does not assume normality in residuals, so this is not a major issue. 
+
+#QQPLOT of residuals
+qqPlot(incidencias$res_inc, main = "QQ Plot of Residuals")
+
+
+# 3. Dispersion Check using DHARMa
+sim_res <- simulateResiduals(fittedModel = nb_bam_month_inc)
+
+# Check dispersion
+testDispersion(sim_res)
+plot(sim_res)
+
+# 4. Pseudo R² (Goodness of fit)
+valid_idx <- !is.na(incidencias$Incidence) & !is.na(incidencias$pred_inc)
+
+# Deviance-based pseudo R-squared for NB-GAMM
+null_deviance <- nb_bam_month_inc$null.deviance
+residual_deviance <- nb_bam_month_inc$deviance
+
+expl_deviance <- 1 - (residual_deviance / null_deviance)
+print(paste("Explained Deviance:", round(expl_deviance, 3)))
+
+# 0.43 # Some underdispersion
+
+
+# 5. Outliers & Influential Points
+ggplot(incidencias, aes(x = factor(Year), y = res_inc)) +
+  geom_boxplot(fill = "lightblue", alpha = 0.7) +
+  labs(title = "Residuals by Year",
+       x = "Year",
+       y = "Residuals") +
+  theme_minimal()
+
+ggplot(incidencias, aes(x = factor(Month), y = res_inc)) +
+  geom_boxplot(fill = "lightgreen", alpha = 0.7) +
+  labs(title = "Residuals by Month",
+       x = "Month",
+       y = "Residuals") +
+  theme_minimal()
+
+# 6️⃣ Autocorrelation Check
+acf(incidencias$res_inc, main = "Autocorrelation of Residuals")
+
+
+# Perform the Durbin-Watson test
+dw_test_result <- dwtest(res_inc ~ 1, data = incidencias)
+# Print the result
+print(dw_test_result)
+
+# Interpreting the DW Test Results
+#DW ≈ 2 → No significant autocorrelation
+#DW < 2 → Positive autocorrelation (common in time-series data)
+# > 2 → Negative autocorrelation (less common)
+
+#To compare residuals across models, we need Pearson residuals. We will rename them as "res_inc"
+incidencias <- incidencias %>% select(Month, Year, Incidence, pred_inc, pearson_res)
+incidencias<-incidencias%>% rename(res_inc=pearson_res)
+names(incidencias)
+
+```
+
+## GAMM: CNP RS-VI
+
+### NDVI
+```{r message=FALSE, warning=FALSE, rows.print = 24}
+#1. NDVI
+# Fit the GAMM model for NDVI using a cyclic smooth for Month and Year as a random effect
+gamm_NDVIc <- gamm(
+  mean_NDVI ~ s(Month, bs = "cc", k = 12),  # s(Month): cyclic smoothing for seasonal pattern
+  random = list(Year = ~1),                # Random effect for Year
+  family = gaussian(link = "identity"),    # Gaussian family (continuous response)
+  data = cnp,
+  method = "REML")
+
+# Display model summaries
+summary(gamm_NDVIc$gam)  # Fixed effects (smooth term for Month)
+summary(gamm_NDVIc$lme)  # Random effects (Year)
+
+# Compute Pseudo R-squared for the Gaussian model
+r_squared <- cor(cnp$mean_NDVI, fitted(gamm_NDVIc$gam))^2
+print(paste("Pseudo R-squared:", round(r_squared, 3)))  # Approximately 0.386
+
+# Plot the smooth term with specified y-axis limits
+y_min <- -0.03; y_max <- 0.05
+plot(gamm_NDVIc$gam, pages = 1, shade = TRUE, shade.col = "#99C66C",
+     main = "GAMM Fit: NDVIc ~ Month + Year (Random)", ylim = c(y_min, y_max))
+```
+
+```{r message=FALSE, warning=FALSE, rows.print = 24}
+##### Model Validation #####
+
+# 1. Residual Diagnostics
+# Extract deviance residuals and predicted values
+res_ndvi <- residuals(gamm_NDVIc$gam, type = "deviance")
+pred_ndvi <- predict(gamm_NDVIc$gam, type = "response")
+
+# Compute standardized residuals
+std_res_ndvi <- res_ndvi / sd(res_ndvi, na.rm = TRUE)
+
+# Add residuals and predictions to the dataset
+cnp <- cnp %>% 
+  mutate(res_NDVIc = std_res_ndvi, pred_NDVIc = pred_ndvi)
+
+# Observed vs. Predicted Plot
+ggplot(cnp, aes(x = Month, y = mean_NDVI)) +
+  geom_point(alpha = 0.6) +
+  geom_line(aes(y = pred_NDVIc), color = "blue", size = 1) +
+  labs(title = "Observed vs Predicted NDVIc by Month", x = "Month", y = "NDVIc") +
+  theme_minimal()
+
+# Residuals vs. Fitted Plot
+plot(fitted(gamm_NDVIc$gam), res_ndvi,
+     xlab = "Fitted Values", ylab = "Residuals",
+     main = "Residuals vs Fitted Values")
+abline(h = 0, col = "red")
+
+# Histogram of Residuals
+hist(res_ndvi, breaks = 20, col = "lightblue", main = "Histogram of Residuals", xlab = "Residuals")
+
+# Q-Q Plot of Residuals
+qqPlot(res_ndvi, main = "QQ Plot of Residuals")
+
+shapiro.test(res_ndvi)  # Note: NB models do not assume normality
+
+# 2. Temporal Autocorrelation
+# Plot standardized residuals over time
+plot(cnp$Month, std_res_ndvi,
+     xlab = "Month", ylab = "Standardized Residuals",
+     main = "Residuals Over Time")
+abline(h = 0, col = "red")
+
+# Autocorrelation Function (ACF) plot
+acf(res_ndvi, main = "ACF of Residuals")
+
+# Durbin-Watson Test for autocorrelation
+dw_result <- dwtest(std_res_ndvi ~ 1, data = cnp)
+print(dw_result)
+
+# 3. Homoscedasticity (Constant Variance)
+# Boxplot of standardized residuals by Year and by Month
+ggplot(cnp, aes(x = factor(Year), y = std_res_ndvi)) +
+  geom_boxplot(fill = "lightblue", alpha = 0.7) +
+  labs(title = "Residuals by Year", x = "Year", y = "Standardized Residuals") +
+  theme_minimal()
+
+ggplot(cnp, aes(x = factor(Month), y = std_res_ndvi)) +
+  geom_boxplot(fill = "lightgreen", alpha = 0.7) +
+  labs(title = "Residuals by Month", x = "Month", y = "Standardized Residuals") +
+  theme_minimal()
+
+#Levene test to check heteroscedasticity across groups
+#Year
+leveneTest(std_res_ndvi ~ factor(Year), data = cnp)
+
+#Month
+leveneTest(std_res_ndvi ~ factor(Month), data = cnp)
+
+# p> 0.05 and therefore, there is not significant heterocedasticity
+
+
+
+# 4. Observed vs. Predicted (Comparison of NDVI)
+plot(cnp$mean_NDVI, fitted(gamm_NDVIc$gam),
+     xlab = "Observed NDVIc", ylab = "Predicted NDVIc",
+     main = "Observed vs Predicted NDVIc")
+abline(a = 0, b = 1, col = "red")
+
+
+```
+
+
+### EVI2
+```{r message=FALSE, warning=FALSE, rows.print = 24}
+
+# Fit the GAMM model for EVI2
+gamm_EVI2c <- gamm(
+  mean_EVI2 ~ s(Month, bs = "cc", k = 12),  # s(Month): cyclic smoothing for seasonal pattern
+  random = list(Year = ~1),                # Random effect for Year
+  family = gaussian(link = "identity"),    # Gaussian family (continuous response)
+  data = cnp,
+  method = "REML")
+
+# Display model summaries
+summary(gamm_EVI2c$gam)  # Fixed effects (smooth term for Month)
+summary(gamm_EVI2c$lme)  # Random effects (Year)
+
+# Compute Pseudo R-squared for the Gaussian model
+r_squared_evi2 <- cor(cnp$mean_EVI2, fitted(gamm_EVI2c$gam))^2
+print(paste("Pseudo R-squared:", round(r_squared_evi2, 3)))  #
+
+# Plot the smooth term with specified y-axis limits (adjust y_min/y_max as needed)
+y_min<-(-0.06); y_max<-0.09
+plot(gamm_EVI2c$gam, pages = 1, shade = TRUE, shade.col = "#99C66C",
+     main = "GAMM Fit: EVI2c ~ Month + Year (Random)", ylim = c(y_min, y_max))
+
+```
+
+
+```{r message=FALSE, warning=FALSE, rows.print = 24}
+# Model Validation
+
+# 1. Residual Diagnostics
+res_evi2 <- residuals(gamm_EVI2c$gam, type = "deviance")
+pred_evi2 <- predict(gamm_EVI2c$gam, type = "response")
+std_res_evi2 <- res_evi2 / sd(res_evi2, na.rm = TRUE)
+
+# Add to dataset
+cnp <- cnp %>% 
+  mutate(res_EVI2c = std_res_evi2, pred_EVI2c= pred_evi2)
+
+# Observed vs. Predicted Plot
+ggplot(cnp, aes(x = Month, y = mean_EVI2)) +
+  geom_point(alpha = 0.6) +
+  geom_line(aes(y = pred_evi2), color = "blue", size = 1) +
+  labs(title = "Observed vs Predicted EVI2 by Month", x = "Month", y = "EVI2") +
+  theme_minimal()
+
+# Residuals vs. Fitted Values
+plot(fitted(gamm_EVI2c$gam), res_evi2,
+     xlab = "Fitted Values", ylab = "Residuals",
+     main = "Residuals vs Fitted Values (EVI2)")
+abline(h = 0, col = "red")
+
+# Histogram of Residuals
+hist(res_evi2, breaks = 20, col = "lightblue", main = "Histogram of Residuals (EVI2)", xlab = "Residuals")
+
+# Q-Q Plot of Residuals
+qqPlot(res_evi2, main = "QQ Plot of Residuals (EVI2)")
+
+
+shapiro.test(res_evi2)
+
+# 2. Temporal Autocorrelation
+plot(cnp$Month, std_res_evi2,
+     xlab = "Month", ylab = "Standardized Residuals",
+     main = "Residuals Over Time (EVI2)")
+abline(h = 0, col = "red")
+acf(res_evi2, main = "ACF of Residuals (EVI2)")
+dw_result_evi2 <- dwtest(std_res_evi2 ~ 1, data = cnp)
+print(dw_result_evi2)
+
+# 3. Homoscedasticity (Boxplots)
+ggplot(cnp, aes(x = factor(Year), y = std_res_evi2)) +
+  geom_boxplot(fill = "lightblue", alpha = 0.7) +
+  labs(title = "Residuals by Year (EVI2)", x = "Year", y = "Standardized Residuals") +
+  theme_minimal()
+
+ggplot(cnp, aes(x = factor(Month), y = std_res_evi2)) +
+  geom_boxplot(fill = "lightgreen", alpha = 0.7) +
+  labs(title = "Residuals by Month (EVI2)", x = "Month", y = "Standardized Residuals") +
+  theme_minimal()
+
+#Levene test to check heteroscedasticity across groups
+#Year
+leveneTest(std_res_evi2 ~ factor(Year), data = cnp)
+
+#Month
+leveneTest(std_res_evi2 ~ factor(Month), data = cnp)
+
+# p> 0.05 and therefore, there is not significant heterocedasticity
+
+
+# 4. Observed vs. Predicted Comparison
+plot(cnp$mean_EVI2, fitted(gamm_EVI2c$gam),
+     xlab = "Observed EVI2", ylab = "Predicted EVI2",
+     main = "Observed vs Predicted EVI2")
+abline(a = 0, b = 1, col = "red")
+```
+
+
+### GVMI
+```{r}
+# Fit the GAMM model for GVMI
+gamm_GVMIc <- gamm(
+  mean_GVMI ~ s(Month, bs = "cc", k = 12),  # s(Month): cyclic smoothing for seasonal pattern
+  random = list(Year = ~1),                # Random effect for Year
+  family = gaussian(link = "identity"),    # Gaussian family (continuous response)
+  data = cnp,
+  method = "REML")
+
+# Display model summaries
+summary(gamm_GVMIc$gam)  # Fixed effects (smooth term for Month)
+summary(gamm_GVMIc$lme)  # Random effects (Year)
+
+# Compute Pseudo R-squared for the Gaussian model
+r_squared_gvmi <- cor(cnp$mean_GVMI, fitted(gamm_GVMIc$gam))^2
+print(paste("Pseudo R-squared:", round(r_squared_gvmi, 3)))  # 0.16
+
+# Plot the smooth term (adjust y-axis limits as needed for GVMI)
+y_min<- (-0.02); y_max<-  0.02 
+plot(gamm_GVMIc$gam, pages = 1, shade = TRUE, shade.col = "#99C66C",
+     main = "GAMM Fit: GVMIc ~ Month + Year (Random)", ylim = c(y_min, y_max))
+
+```
+
+
+```{r}
+##### Model Validation #####
+
+# 1. Residual Diagnostics
+res_gvmi <- residuals(gamm_GVMIc$gam, type = "deviance")
+pred_gvmi <- predict(gamm_GVMIc$gam, type = "response")
+std_res_gvmi <- res_gvmi / sd(res_gvmi, na.rm = TRUE)
+
+# Add residuals and predictions to the dataset
+cnp <- cnp %>% 
+  mutate(res_GVMIc = std_res_gvmi, pred_GVMIc = pred_gvmi)
+
+# Observed vs. Predicted Plot
+ggplot(cnp, aes(x = Month, y = mean_GVMI)) +
+  geom_point(alpha = 0.6) +
+  geom_line(aes(y = pred_gvmi), color = "blue", size = 1) +
+  labs(title = "Observed vs Predicted GVMI by Month", x = "Month", y = "GVMI") +
+  theme_minimal()
+
+# Residuals vs. Fitted Values
+plot(fitted(gamm_GVMIc$gam), res_gvmi,
+     xlab = "Fitted Values", ylab = "Residuals",
+     main = "Residuals vs Fitted Values (GVMI)")
+abline(h = 0, col = "red")
+
+# Histogram of Residuals
+hist(res_gvmi, breaks = 20, col = "lightblue", main = "Histogram of Residuals (GVMI)", xlab = "Residuals")
+
+# Q-Q Plot of Residuals
+qqPlot(res_gvmi, main = "QQ Plot of Residuals (GVMI)")
+shapiro.test(res_gvmi)
+
+# 2. Temporal Autocorrelation
+plot(cnp$Month, std_res_gvmi,
+     xlab = "Month", ylab = "Standardized Residuals",
+     main = "Residuals Over Time (GVMI)")
+abline(h = 0, col = "red")
+acf(res_gvmi, main = "ACF of Residuals (GVMI)")
+dw_result_gvmi <- dwtest(std_res_gvmi ~ 1, data = cnp)
+print(dw_result_gvmi)
+
+# 3. Homoscedasticity (Boxplots)
+ggplot(cnp, aes(x = factor(Year), y = std_res_gvmi)) +
+  geom_boxplot(fill = "lightblue", alpha = 0.7) +
+  labs(title = "Residuals by Year (GVMI)", x = "Year", y = "Standardized Residuals") +
+  theme_minimal()
+
+ggplot(cnp, aes(x = factor(Month), y = std_res_gvmi)) +
+  geom_boxplot(fill = "lightgreen", alpha = 0.7) +
+  labs(title = "Residuals by Month (GVMI)", x = "Month", y = "Standardized Residuals") +
+  theme_minimal()
+
+#Levene test to check heteroscedasticity across groups
+#Year
+leveneTest(std_res_gvmi ~ factor(Year), data = cnp)
+
+#Month
+leveneTest(std_res_gvmi ~ factor(Month), data = cnp)
+
+# p< 0.05 and therefore, there is significant heteroscedasticity by Year!
+
+# 4. Observed vs. Predicted Comparison
+plot(cnp$mean_GVMI, fitted(gamm_GVMIc$gam),
+     xlab = "Observed GVMI", ylab = "Predicted GVMI",
+     main = "Observed vs Predicted GVMI")
+abline(a = 0, b = 1, col = "red")
+
+```
+
+
+```{r}
+# To deal with heteroscedasticity: We model a variance function, using the weights argument in gamm()  to let the model learn a different residual variance per year. 
+
+gamm_GVMIc <- gamm(
+  mean_GVMI ~ s(Month, bs="cc", k=12),
+  random  = list(Year=~1),
+  family  = gaussian(),
+  data    = cnp,
+  method  = "REML",
+  weights = varIdent(form = ~1 | Year) )
+
+# Compute Pseudo R-squared for the Gaussian model
+r_squared_gvmi <- cor(cnp$mean_GVMI, fitted(gamm_GVMIc$gam))^2
+print(paste("Pseudo R-squared:", round(r_squared_gvmi, 3)))  # 0.14
+
+# Model validation
+# 1. Residual Diagnostics
+res_gvmi <- residuals(gamm_GVMIc$gam, type = "deviance")
+pred_gvmi <- predict(gamm_GVMIc$gam, type = "response")
+std_res_gvmi <- res_gvmi / sd(res_gvmi, na.rm = TRUE)
+
+# Add residuals and predictions to the dataset
+cnp <- cnp %>% 
+  mutate(res_GVMIc = std_res_gvmi, pred_GVMIc = pred_gvmi)
+
+# Histogram of Residuals
+hist(res_gvmi, breaks = 20, col = "lightblue", main = "Histogram of Residuals (GVMI)", xlab = "Residuals")
+
+# Q-Q Plot of Residuals
+qqPlot(res_gvmi, main = "QQ Plot of Residuals (GVMI)")
+shapiro.test(res_gvmi)
+
+# 3. Homoscedasticity
+#Levene test to check heteroscedasticity across groups
+#Year
+leveneTest(std_res_gvmi ~ factor(Year), data = cnp)
+
+#Month
+leveneTest(std_res_gvmi ~ factor(Month), data = cnp)
+
+# When we validate the model again, Levene's test is not significative, but pseudo R2 decreases from 0.16 to 0.14. This model has not a good explanatory power.
+
+```
+
+
+### NDWI
+```{r}
+# Fit the GAMM model for NDWI 
+gamm_NDWIc <- gamm(
+  mean_NDWI ~ s(Month, bs = "cc", k = 12),  # s(Month): cyclic smoothing for seasonal pattern
+  random = list(Year = ~1),                # Random effect for Year
+  family = gaussian(link = "identity"),    # Gaussian family (continuous response)
+  data = cnp,
+  method = "REML")
+
+# Display model summaries
+summary(gamm_NDWIc$gam)  # Fixed effects (smooth term for Month)
+summary(gamm_NDWIc$lme)  # Random effects (Year)
+
+# Compute Pseudo R-squared for the Gaussian model
+r_squared_ndwi <- cor(cnp$mean_NDWI, fitted(gamm_NDWIc$gam))^2
+print(paste("Pseudo R-squared:", round(r_squared_ndwi, 3)))  # 0.29
+
+# Plot the smooth term (adjust y-axis limits as needed for NDWI)
+y_min<- (-0.03);y_max<-0.04
+plot(gamm_NDWIc$gam, pages = 1, shade = TRUE, shade.col = "#99C66C",
+     main = "GAMM Fit: mean_NDWIc ~ Month + Year (Random)", ylim = c(y_min, y_max))
+```
+
+
+```{r}
+#### Model Validation #####
+
+# 1. Residual Diagnostics
+res_ndwi <- residuals(gamm_NDWIc$gam, type = "deviance")
+pred_ndwi <- predict(gamm_NDWIc$gam, type = "response")
+std_res_ndwi <- res_ndwi / sd(res_ndwi, na.rm = TRUE)
+
+# Add residuals and predictions to the dataset
+cnp <- cnp %>% mutate(res_NDWIc = std_res_ndwi, pred_NDWIc = pred_ndwi)
+
+# Observed vs. Predicted Plot
+ggplot(cnp, aes(x = Month, y = mean_NDWI)) +
+  geom_point(alpha = 0.6) +
+  geom_line(aes(y = pred_ndwi), color = "blue", size = 1) +
+  labs(title = "Observed vs Predicted NDWI by Month", x = "Month", y = "NDWI") +
+  theme_minimal()
+
+# Residuals vs. Fitted Values
+plot(fitted(gamm_NDWIc$gam), res_ndwi,
+     xlab = "Fitted Values", ylab = "Residuals",
+     main = "Residuals vs Fitted Values (NDWI)")
+abline(h = 0, col = "red")
+
+# Histogram of Residuals
+hist(res_ndwi, breaks = 20, col = "lightblue", main = "Histogram of Residuals (NDWI)", xlab = "Residuals")
+
+# Q-Q Plot of Residuals
+qqPlot(res_ndwi, main = "QQ Plot of Residuals (NDWI)")
+shapiro.test(res_ndwi)
+
+# 2. Temporal Autocorrelation
+plot(cnp$Month, std_res_ndwi,
+     xlab = "Month", ylab = "Standardized Residuals",
+     main = "Residuals Over Time (NDWI)")
+abline(h = 0, col = "red")
+acf(res_ndwi, main = "ACF of Residuals (NDWI)")
+dw_result_ndwi <- dwtest(std_res_ndwi ~ 1, data = cnp)
+print(dw_result_ndwi)
+
+# 3. Homoscedasticity (Boxplots)
+ggplot(cnp, aes(x = factor(Year), y = std_res_ndwi)) +
+  geom_boxplot(fill = "lightblue", alpha = 0.7) +
+  labs(title = "Residuals by Year (NDWI)", x = "Year", y = "Standardized Residuals") +
+  theme_minimal()
+
+ggplot(cnp, aes(x = factor(Month), y = std_res_ndwi)) +
+  geom_boxplot(fill = "lightgreen", alpha = 0.7) +
+  labs(title = "Residuals by Month (NDWI)", x = "Month", y = "Standardized Residuals") +
+  theme_minimal()
+
+#Levene test to check heteroscedasticity across groups
+#Year
+leveneTest(std_res_ndwi ~ factor(Year), data = cnp)
+
+#Month
+leveneTest(std_res_ndwi ~ factor(Month), data = cnp)
+
+# p< 0.05 and therefore, there is significant heteroscedasticity by Year!
+
+
+# 4. Observed vs. Predicted Comparison
+plot(cnp$mean_NDWI, fitted(gamm_NDWIc$gam),
+     xlab = "Observed NDWI", ylab = "Predicted NDWI",
+     main = "Observed vs Predicted NDWI")
+abline(a = 0, b = 1, col = "red")
+```
+
+
+```{r}
+## To deal with heteroscedasticity: We model a variance function, using the weights argument in gamm()  to let the model learn a different residual variance per year. 
+
+gamm_NDWIc <- gamm(
+  mean_NDWI ~ s(Month, bs="cc", k=12),
+  random  = list(Year=~1),
+  family  = gaussian(),
+  data    = cnp,
+  method  = "REML",
+  weights = varIdent(form = ~1 | Year) )
+
+# Compute Pseudo R-squared for the Gaussian model
+r_squared_ndwi <- cor(cnp$mean_NDWI, fitted(gamm_NDWIc$gam))^2
+print(paste("Pseudo R-squared:", round(r_squared_ndwi, 3)))  # 0.28
+
+# Display model summaries
+summary(gamm_NDWIc$gam)  # Fixed effects (smooth term for Month)
+summary(gamm_NDWIc$lme)  # Random effects (Year)
+```
+
+
+```{r}
+# Model Validation #####
+
+# 1. Residual Diagnostics
+res_ndwi <- residuals(gamm_NDWIc$gam, type = "deviance")
+pred_ndwi <- predict(gamm_NDWIc$gam, type = "response")
+std_res_ndwi <- res_ndwi / sd(res_ndwi, na.rm = TRUE)
+
+# Add residuals and predictions to the dataset
+cnp <- cnp %>% mutate(res_NDWIc = std_res_ndwi, pred_NDWIc = pred_ndwi)
+
+# Histogram of Residuals
+hist(res_ndwi, breaks = 20, col = "lightblue", main = "Histogram of Residuals (NDWI)", xlab = "Residuals")
+
+# Q-Q Plot of Residuals
+qqPlot(res_ndwi, main = "QQ Plot of Residuals (NDWI)")
+shapiro.test(res_ndwi)
+
+
+#Levene test to check heteroscedasticity across groups
+#Year
+leveneTest(std_res_ndwi ~ factor(Year), data = cnp)
+
+#Month
+leveneTest(std_res_ndwi ~ factor(Month), data = cnp)
+
+# When we validate the model again, Levene's test is not significative
+
+```
+
+
+
+
+
+## GAMM: Urban Parks RS-VI
+
+### NDVI
+```{r}
+# Fit the GAMM model for NDVI
+gamm_NDVIp <- gamm(
+  mean_NDVI ~ s(Month, bs = "cc", k = 12),  # s(Month): cyclic smoothing for seasonal pattern
+  random = list(Year = ~1),                # Random effect for Year
+  family = gaussian(link = "identity"),    # Gaussian family (continuous response)
+  data = park,
+  method = "REML")
+
+# Display model summaries
+summary(gamm_NDVIp$gam)  # Fixed effects (smooth term for Month)
+summary(gamm_NDVIp$lme)  # Random effects (Year)
+
+# Compute Pseudo R-squared for the Gaussian model
+r_squared <- cor(park$mean_NDVI, fitted(gamm_NDVIp$gam))^2
+print(paste("Pseudo R-squared:", round(r_squared, 3)))  # 0.42
+
+# Plot the smooth term with specified y-axis limits
+y_min <- -0.03; y_max <- 0.05
+plot(gamm_NDVIp$gam, pages = 1, shade = TRUE, shade.col = "#66FFFF",
+     main = "GAMM Fit: mean_NDVIp ~ Month + Year (Random)", ylim = c(y_min, y_max))
+```
+
+
+```{r}
+# Model Validation
+
+# 1. Residual Diagnostics
+# Extract deviance residuals and predicted values
+res_ndvi <- residuals(gamm_NDVIp$gam, type = "deviance")
+pred_ndvi <- predict(gamm_NDVIp$gam, type = "response")
+
+# Compute standardized residuals
+std_res_ndvi <- res_ndvi / sd(res_ndvi, na.rm = TRUE)
+
+# Add residuals and predictions to the dataset
+park <- park %>% 
+  mutate(res_NDVIp = std_res_ndvi, pred_NDVIp = pred_ndvi)
+
+# Observed vs. Predicted Plot
+ggplot(park, aes(x = Month, y = mean_NDVI)) +
+  geom_point(alpha = 0.6) +
+  geom_line(aes(y = pred_ndvi), color = "blue", size = 1) +
+  labs(title = "Observed vs Predicted NDVI by Month", x = "Month", y = "NDVI") +
+  theme_minimal()
+
+# Residuals vs. Fitted Plot
+plot(fitted(gamm_NDVIp$gam), res_ndvi,
+     xlab = "Fitted Values", ylab = "Residuals",
+     main = "Residuals vs Fitted Values")
+abline(h = 0, col = "red")
+
+# Histogram of Residuals
+hist(res_ndvi, breaks = 20, col = "lightblue", main = "Histogram of Residuals", xlab = "Residuals")
+
+# Q-Q Plot of Residuals
+qqPlot(res_ndvi, main = "QQ Plot of Residuals")
+
+shapiro.test(res_ndvi)  # Note: NB models do not assume normality
+
+# 2. Temporal Autocorrelation
+# Plot standardized residuals over time
+plot(park$Month, std_res_ndvi,
+     xlab = "Month", ylab = "Standardized Residuals",
+     main = "Residuals Over Time")
+abline(h = 0, col = "red")
+
+# Autocorrelation Function (ACF) plot
+acf(res_ndvi, main = "ACF of Residuals")
+
+# Durbin-Watson Test for autocorrelation
+dw_result <- dwtest(std_res_ndvi ~ 1, data = park)
+print(dw_result)
+
+# 3. Homoscedasticity (Constant Variance)
+# Boxplot of standardized residuals by Year and by Month
+ggplot(park, aes(x = factor(Year), y = std_res_ndvi)) +
+  geom_boxplot(fill = "lightblue", alpha = 0.7) +
+  labs(title = "Residuals by Year", x = "Year", y = "Standardized Residuals") +
+  theme_minimal()
+
+ggplot(park, aes(x = factor(Month), y = std_res_ndvi)) +
+  geom_boxplot(fill = "lightgreen", alpha = 0.7) +
+  labs(title = "Residuals by Month", x = "Month", y = "Standardized Residuals") +
+  theme_minimal()
+
+#Levene test to check heteroscedasticity across groups
+#Year
+leveneTest(std_res_ndvi ~ factor(Year), data = park)
+
+#Month
+leveneTest(std_res_ndvi ~ factor(Month), data = park)
+
+
+# 4. Observed vs. Predicted (Comparison of NDVI)
+plot(park$mean_NDVI, fitted(gamm_NDVIp$gam),
+     xlab = "Observed NDVI", ylab = "Predicted NDVI",
+     main = "Observed vs Predicted NDVI")
+abline(a = 0, b = 1, col = "red")
+```
+
+
+### EVI2
+```{r}
+# Fit the GAMM model for EVI2
+gamm_EVI2p <- gamm(
+  mean_EVI2 ~ s(Month, bs = "cc", k = 12),  # s(Month): cyclic smoothing for seasonal pattern
+  random = list(Year = ~1),                # Random effect for Year
+  family = gaussian(link = "identity"),    # Gaussian family (continuous response)
+  data = park,
+  method = "REML")
+
+# Display model summaries
+summary(gamm_EVI2p$gam)  # Fixed effects (smooth term for Month)
+summary(gamm_EVI2p$lme)  # Random effects (Year)
+
+# Compute Pseudo R-squared for the Gaussian model
+r_squared_evi2 <- cor(park$mean_EVI2, fitted(gamm_EVI2p$gam))^2
+print(paste("Pseudo R-squared:", round(r_squared_evi2, 3)))  # 0.43
+
+# Plot the smooth term with specified y-axis limits (adjust y_min/y_max as needed)
+y_min<-(-0.06); y_max<-0.09
+plot(gamm_EVI2p$gam, pages = 1, shade = TRUE, shade.col = "#66FFFF",
+     main = "GAMM Fit: mean_EVI2p ~ Month + Year (Random)", ylim = c(y_min, y_max))
+```
+
+
+```{r}
+# Model Validation
+
+# 1. Residual Diagnostics
+res_evi2 <- residuals(gamm_EVI2p$gam, type = "deviance")
+pred_evi2 <- predict(gamm_EVI2p$gam, type = "response")
+std_res_evi2 <- res_evi2 / sd(res_evi2, na.rm = TRUE)
+
+# Add to dataset
+park <- park %>% 
+  mutate(res_EVI2p = std_res_evi2, pred_EVI2p = pred_evi2)
+
+# Observed vs. Predicted Plot
+ggplot(park, aes(x = Month, y = mean_EVI2)) +
+  geom_point(alpha = 0.6) +
+  geom_line(aes(y = pred_evi2), color = "blue", size = 1) +
+  labs(title = "Observed vs Predicted EVI2 by Month", x = "Month", y = "EVI2") +
+  theme_minimal()
+
+# Residuals vs. Fitted Values
+plot(fitted(gamm_EVI2p$gam), res_evi2,
+     xlab = "Fitted Values", ylab = "Residuals",
+     main = "Residuals vs Fitted Values (EVI2)")
+abline(h = 0, col = "red")
+
+# Histogram of Residuals
+hist(res_evi2, breaks = 20, col = "lightblue", main = "Histogram of Residuals (EVI2)", xlab = "Residuals")
+
+# Q-Q Plot of Residuals
+qqPlot(res_evi2, main = "QQ Plot of Residuals (EVI2)")
+
+
+shapiro.test(res_evi2)
+
+# 2. Temporal Autocorrelation
+plot(park$Month, std_res_evi2,
+     xlab = "Month", ylab = "Standardized Residuals",
+     main = "Residuals Over Time (EVI2)")
+abline(h = 0, col = "red")
+acf(res_evi2, main = "ACF of Residuals (EVI2)")
+dw_result_evi2 <- dwtest(std_res_evi2 ~ 1, data = park)
+print(dw_result_evi2)
+
+# 3. Homoscedasticity (Boxplots)
+ggplot(park, aes(x = factor(Year), y = std_res_evi2)) +
+  geom_boxplot(fill = "lightblue", alpha = 0.7) +
+  labs(title = "Residuals by Year (EVI2)", x = "Year", y = "Standardized Residuals") +
+  theme_minimal()
+
+ggplot(park, aes(x = factor(Month), y = std_res_evi2)) +
+  geom_boxplot(fill = "lightgreen", alpha = 0.7) +
+  labs(title = "Residuals by Month (EVI2)", x = "Month", y = "Standardized Residuals") +
+  theme_minimal()
+
+#Levene test to check heteroscedasticity across groups
+#Year
+leveneTest(std_res_evi2 ~ factor(Year), data = park)
+
+#Month
+leveneTest(std_res_evi2 ~ factor(Month), data = park)
+
+
+# 4. Observed vs. Predicted Comparison
+plot(park$mean_EVI2, fitted(gamm_EVI2p$gam),
+     xlab = "Observed EVI2", ylab = "Predicted EVI2",
+     main = "Observed vs Predicted EVI2")
+abline(a = 0, b = 1, col = "red")
+
+```
+
+
+### GVMI
+```{r}
+# Fit the GAMM model for EVI2 using a cyclic smooth for Month and Year as a random effect
+gamm_GVMIp <- gamm(
+  mean_GVMI ~ s(Month, bs = "cc", k = 12),  # s(Month): cyclic smoothing for seasonal pattern
+  random = list(Year = ~1),                # Random effect for Year
+  family = gaussian(link = "identity"),    # Gaussian family (continuous response)
+  data = park,
+  method = "REML")
+
+# Display model summaries
+summary(gamm_GVMIp$gam)  # Fixed effects (smooth term for Month)
+summary(gamm_GVMIp$lme)  # Random effects (Year)
+
+# Compute Pseudo R-squared for the Gaussian model
+r_squared_gvmi <- cor(park$mean_GVMI, fitted(gamm_GVMIp$gam))^2
+print(paste("Pseudo R-squared:", round(r_squared_gvmi, 3)))  # 0.32
+
+# Plot the smooth term (adjust y-axis limits as needed for GVMI)
+y_min<- (-0.02); y_max<-  0.02 
+plot(gamm_GVMIp$gam, pages = 1, shade = TRUE, shade.col = "#66FFFF",
+     main = "GAMM Fit: mean_GVMIp ~ Month + Year (Random)", ylim = c(y_min, y_max))
+```
+
+
+```{r}
+#Model Validation
+# 1. Residual Diagnostics
+res_gvmi <- residuals(gamm_GVMIp$gam, type = "deviance")
+pred_gvmi <- predict(gamm_GVMIp$gam, type = "response")
+std_res_gvmi <- res_gvmi / sd(res_gvmi, na.rm = TRUE)
+
+# Add residuals and predictions to the dataset
+park <- park %>% 
+  mutate(res_GVMIp = std_res_gvmi, pred_GVMIp = pred_gvmi)
+
+# Observed vs. Predicted Plot
+ggplot(park, aes(x = Month, y = mean_GVMI)) +
+  geom_point(alpha = 0.6) +
+  geom_line(aes(y = pred_gvmi), color = "blue", size = 1) +
+  labs(title = "Observed vs Predicted GVMI by Month", x = "Month", y = "GVMI") +
+  theme_minimal()
+
+# Residuals vs. Fitted Values
+plot(fitted(gamm_GVMIp$gam), res_gvmi,
+     xlab = "Fitted Values", ylab = "Residuals",
+     main = "Residuals vs Fitted Values (GVMI)")
+abline(h = 0, col = "red")
+
+# Histogram of Residuals
+hist(res_gvmi, breaks = 20, col = "lightblue", main = "Histogram of Residuals (GVMI)", xlab = "Residuals")
+
+# Q-Q Plot of Residuals
+qqPlot(res_gvmi, main = "QQ Plot of Residuals (GVMI)")
+shapiro.test(res_gvmi)
+
+# 2. Temporal Autocorrelation
+plot(park$Month, std_res_gvmi,
+     xlab = "Month", ylab = "Standardized Residuals",
+     main = "Residuals Over Time (GVMI)")
+abline(h = 0, col = "red")
+acf(res_gvmi, main = "ACF of Residuals (GVMI)")
+dw_result_gvmi <- dwtest(std_res_gvmi ~ 1, data = park)
+print(dw_result_gvmi)
+
+# 3. Homoscedasticity (Boxplots)
+ggplot(park, aes(x = factor(Year), y = std_res_gvmi)) +
+  geom_boxplot(fill = "lightblue", alpha = 0.7) +
+  labs(title = "Residuals by Year (GVMI)", x = "Year", y = "Standardized Residuals") +
+  theme_minimal()
+
+ggplot(park, aes(x = factor(Month), y = std_res_gvmi)) +
+  geom_boxplot(fill = "lightgreen", alpha = 0.7) +
+  labs(title = "Residuals by Month (GVMI)", x = "Month", y = "Standardized Residuals") +
+  theme_minimal()
+
+#Levene test to check heteroscedasticity across groups
+#Year
+leveneTest(std_res_gvmi ~ factor(Year), data = park)
+
+#Month
+leveneTest(std_res_gvmi ~ factor(Month), data = park)
+
+
+# 4. Observed vs. Predicted Comparison
+plot(park$mean_GVMI, fitted(gamm_GVMIp$gam),
+     xlab = "Observed GVMI", ylab = "Predicted GVMI",
+     main = "Observed vs Predicted GVMI")
+abline(a = 0, b = 1, col = "red")
+
+```
+
+### NDWI
+```{r}
+# Fit the GAMM model for NDWI using a cyclic smooth for Month and Year as a random effect
+gamm_NDWIp <- gamm(
+  mean_NDWI ~ s(Month, bs = "cc", k = 12),  # s(Month): cyclic smoothing for seasonal pattern
+  random = list(Year = ~1),                # Random effect for Year
+  family = gaussian(link = "identity"),    # Gaussian family (continuous response)
+  data = park,
+  method = "REML")
+
+# Display model summaries
+summary(gamm_NDWIp$gam)  # Fixed effects (smooth term for Month)
+summary(gamm_NDWIp$lme)  # Random effects (Year)
+
+# Compute Pseudo R-squared for the Gaussian model
+r_squared_ndwi <- cor(park$mean_NDWI, fitted(gamm_NDWIp$gam))^2
+print(paste("Pseudo R-squared:", round(r_squared_ndwi, 3)))  # 0.39
+
+# Plot the smooth term (adjust y-axis limits as needed for NDWI)
+y_min<- (-0.03);y_max<-0.04
+plot(gamm_NDWIp$gam, pages = 1, shade = TRUE, shade.col = "#66FFFF",
+     main = "GAMM Fit: mean_NDWIp ~ Month + Year (Random)", ylim = c(y_min, y_max))
+```
+
+
+```{r}
+##### Model Validation
+
+# 1. Residual Diagnostics
+res_ndwi <- residuals(gamm_NDWIp$gam, type = "deviance")
+pred_ndwi <- predict(gamm_NDWIp$gam, type = "response")
+std_res_ndwi <- res_ndwi / sd(res_ndwi, na.rm = TRUE)
+
+# Add residuals and predictions to the dataset
+park <- park %>% mutate(res_NDWIp = std_res_ndwi, pred_NDWIp = pred_ndwi)
+
+# Observed vs. Predicted Plot
+ggplot(park, aes(x = Month, y = mean_NDWI)) +
+  geom_point(alpha = 0.6) +
+  geom_line(aes(y = pred_ndwi), color = "blue", size = 1) +
+  labs(title = "Observed vs Predicted NDWI by Month", x = "Month", y = "NDWI") +
+  theme_minimal()
+
+# Residuals vs. Fitted Values
+plot(fitted(gamm_NDWIp$gam), res_ndwi,
+     xlab = "Fitted Values", ylab = "Residuals",
+     main = "Residuals vs Fitted Values (NDWI)")
+abline(h = 0, col = "red")
+
+# Histogram of Residuals
+hist(res_ndwi, breaks = 20, col = "lightblue", main = "Histogram of Residuals (NDWI)", xlab = "Residuals")
+
+# Q-Q Plot of Residuals
+qqPlot(res_ndwi, main = "QQ Plot of Residuals (NDWI)")
+shapiro.test(res_ndwi)
+
+# 2. Temporal Autocorrelation
+plot(park$Month, std_res_ndwi,
+     xlab = "Month", ylab = "Standardized Residuals",
+     main = "Residuals Over Time (NDWI)")
+abline(h = 0, col = "red")
+acf(res_ndwi, main = "ACF of Residuals (NDWI)")
+dw_result_ndwi <- dwtest(std_res_ndwi ~ 1, data = park)
+print(dw_result_ndwi)
+
+# 3. Homoscedasticity (Boxplots)
+ggplot(park, aes(x = factor(Year), y = std_res_ndwi)) +
+  geom_boxplot(fill = "lightblue", alpha = 0.7) +
+  labs(title = "Residuals by Year (NDWI)", x = "Year", y = "Standardized Residuals") +
+  theme_minimal()
+
+ggplot(park, aes(x = factor(Month), y = std_res_ndwi)) +
+  geom_boxplot(fill = "lightgreen", alpha = 0.7) +
+  labs(title = "Residuals by Month (NDWI)", x = "Month", y = "Standardized Residuals") +
+  theme_minimal()
+
+
+#Levene test to check heteroscedasticity across groups
+#Year
+leveneTest(std_res_ndwi ~ factor(Year), data = park)
+
+#Month
+leveneTest(std_res_ndwi ~ factor(Month), data = park)
+
+
+# 4. Observed vs. Predicted Comparison
+plot(park$mean_NDWI, fitted(gamm_NDWIp$gam),
+     xlab = "Observed NDWI", ylab = "Predicted NDWI",
+     main = "Observed vs Predicted NDWI")
+abline(a = 0, b = 1, col = "red")
+```
+
+
+
+
+
+
+## Plots
+
+```{r, echo=FALSE }
+# Rename and select variables from cnp
+
+cnp_renamed <- cnp %>%
+  rename( NDVIc = mean_NDVI,  EVI2c = mean_EVI2, GVMIc = mean_GVMI, NDWIc = mean_NDWI)
+
+# Rename and select variables from park
+park_renamed <- park %>%
+  rename(NDVIp = mean_NDVI, EVI2p = mean_EVI2, GVMIp = mean_GVMI, NDWIp = mean_NDWI)
+
+# Rename variables from incidencias
+incidencias_renamed <- incidencias %>%
+  rename(Incidences = Incidence)
+
+
+# Merge datasets by Year and Month, then round variables to 3 decimals
+final_df <- cnp_renamed %>%
+  full_join(park_renamed, by = c("Year", "Month")) %>%
+  full_join(incidencias_renamed, by = c("Year", "Month")) %>%
+  mutate(across(-c(Year, Month, Incidences), round, 3))
+
+```
+
+
+```{r, echo=FALSE }
+
+### 1. Create df_pred from final_df
+# final_df  contains Year, Month, and the columns:
+# pred_inc, pred_NDVIc, pred_NDVIp, pred_EVI2c, pred_EVI2p, pred_GVMIc, pred_GVMIp, pred_NDWIc, pred_NDWIp
+df_pred <- final_df %>%
+  select(Year, Month, pred_inc, 
+         pred_NDVIc, pred_NDVIp,
+         pred_EVI2c, pred_EVI2p,
+         pred_GVMIc, pred_GVMIp,
+         pred_NDWIc, pred_NDWIp)
+
+### 2. Aggregate monthly means (so one row per Month)
+df_monthly <- df_pred %>%
+  group_by(Month) %>%
+  summarise(
+    Incidences = mean(pred_inc, na.rm = TRUE),
+    NDVIc      = mean(pred_NDVIc, na.rm = TRUE),
+    NDVIp      = mean(pred_NDVIp, na.rm = TRUE),
+    EVI2c      = mean(pred_EVI2c, na.rm = TRUE),
+    EVI2p      = mean(pred_EVI2p, na.rm = TRUE),
+    GVMIc      = mean(pred_GVMIc, na.rm = TRUE),
+    GVMIp      = mean(pred_GVMIp, na.rm = TRUE),
+    NDWIc      = mean(pred_NDWIc, na.rm = TRUE),
+    NDWIp      = mean(pred_NDWIp, na.rm = TRUE)
+  )
+
+### 3. Plot 1: Incidences with LOESS smoothing + color‐matched band
+p1 <- ggplot(df_monthly, aes(x = Month, y = Incidences)) +
+  geom_smooth(color = "#990000", fill = "#990000",
+              method = "loess", se = TRUE, alpha = 0.2, size = 1.2) +
+  scale_x_continuous(breaks = 1:12) +
+  scale_y_continuous(name = "Wb presence", limits = c(10, 100)) +
+  labs(title = "Seasonal Pattern of Wb Presence", x = "Month") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+    axis.text  = element_text(size = 12),
+    axis.title = element_text(size = 13)
+  )
+
+### 4. Function to create a 2‐line LOESS plot (CNP vs. Parks) with confidence bands
+plot_vi <- function(data, c_var, p_var, vi_name) {
+  ggplot(data) +
+    # CNP line with confidence band (shadow)
+    geom_smooth(aes_string(x = "Month", y = c_var, color = "'CNP'", fill = "'CNP'"),
+                method = "loess", se = TRUE, alpha = 0.2, size = 1.2) +
+    # Parks line with confidence band (shadow)
+    geom_smooth(aes_string(x = "Month", y = p_var, color = "'Parks'", fill = "'Parks'"),
+                method = "loess", se = TRUE, alpha = 0.2, size = 1.2) +
+    scale_x_continuous(breaks = 1:12) +
+    scale_y_continuous(name = vi_name) +
+    scale_color_manual(values = c("CNP" = "#99C66C", "Parks" = "#66FFFF"), name = NULL) +
+    scale_fill_manual(values  = c("CNP" = "#99C66C", "Parks" = "#66FFFF"), guide = "none") +
+    labs(title = paste("Seasonal Pattern of", vi_name), x = "Month") +
+    theme_minimal() +
+    theme(
+      legend.position = "bottom",
+      plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+      axis.text = element_text(size = 12),
+      axis.title = element_text(size = 13)
+    )
+}
+
+
+
+
+### 5. Create plots for NDVI, EVI2, GVMI, NDWI
+p2 <- plot_vi(df_monthly, "NDVIc", "NDVIp", "NDVI")
+p3 <- plot_vi(df_monthly, "EVI2c", "EVI2p", "EVI2")
+p4 <- plot_vi(df_monthly, "GVMIc", "GVMIp", "GVMI")
+p5 <- plot_vi(df_monthly, "NDWIc", "NDWIp", "NDWI")
+
+
+### 6. 
+p1 | p2
+p1 | p3
+p1 | p4
+p1 | p5
+
+```
+
+
+## Kendall Correlations
+```{r}
+## 3.  KENDALL CORRELATIONS ####
+library(gridExtra)
+
+# Define residual variable names for CNP and Park VI models
+cnp_vars <- c("res_NDVIc", "res_EVI2c", "res_GVMIc", "res_NDWIc")
+park_vars <- c("res_NDVIp", "res_EVI2p", "res_GVMIp", "res_NDWIp")
+
+# Function to create a scatterplot comparing a VI residual with Incidences residuals
+plot_scatter <- function(x_var, data) {
+  # Remove the "res_" prefix for labels:
+  label <- sub("^res_", "", x_var)
+  
+  ggplot(data, aes_string(x = x_var, y = "res_inc")) +
+    geom_point(alpha = 0.7, color = "blue") +
+    geom_smooth(method = "lm", color = "red", se = FALSE) +
+    labs(title = paste("Residuals of Presences vs Residuals of", label),
+         x = paste("Residuals of", label),
+         y = "Residuals of Presence") +
+    theme_minimal() +
+    theme(plot.title = element_text(hjust = 0.5))  # Center the title
+}
+
+# Generate plots for CNP VI residuals
+plots_cnp <- lapply(cnp_vars, function(var) {
+  plot_scatter(var, final_df)
+})
+
+# Generate plots for Park VI residuals
+plots_park <- lapply(park_vars, function(var) {
+  plot_scatter(var, final_df)
+})
+
+# Arrange the CNP plots in a grid (e.g., 2 columns x 2 rows)
+grid.arrange(grobs = plots_cnp, ncol = 2, top = "CNP VI Residuals vs. Presence Residuals")
+
+# Arrange the Park plots in a grid (e.g., 2 columns x 2 rows)
+grid.arrange(grobs = plots_park, ncol = 2, top = "Park VI Residuals vs. Presence Residuals")
+
+
+
+
+## KENDALL CORRELATION MATRIX
+### 1. Prepare Data for Residuals Correlation Matrix
+# Define the residual variable names (for both CNP, Parks, and Incidences)
+resid_vars <- c("res_inc", "res_NDVIc", "res_EVI2c",  "res_GVMIc", "res_NDWIc", 
+                "res_NDVIp", "res_EVI2p", "res_GVMIp", "res_NDWIp")
+
+df_res <- final_df %>% 
+  select(all_of(resid_vars)) %>% 
+  mutate(across(everything(), as.numeric))
+
+names(df_res)
+
+#Rename the residuals for final plot
+df_res <- df_res %>%
+  rename(Presence=res_inc,    NDVIc = res_NDVIc,  EVI2c = res_EVI2c, GVMIc = res_GVMIc, NDWIc = res_NDWIc, NDVIp = res_NDVIp,  EVI2p = res_EVI2p, GVMIp = res_GVMIp, NDWIp = res_NDWIp)
+
+
+
+
+### 2. Compute Kendall Correlation Matrix for Residuals
+kendall_cor_res <- cor(df_res, method = "kendall", use = "complete.obs")
+
+# Function to compute p-values for pairwise Kendall tests
+get_p_values <- function(data) {
+  n <- ncol(data)
+  p_mat <- matrix(NA, n, n)
+  for(i in 1:n) {
+    for(j in 1:n) {
+      if(i != j) {
+        p_mat[i, j] <- cor.test(data[[i]], data[[j]], method = "kendall", use = "complete.obs")$p.value
+      }
+    }
+  }
+  colnames(p_mat) <- rownames(p_mat) <- colnames(data)
+  return(p_mat)
+}
+kendall_p_res <- get_p_values(df_res)
+
+### 3. Melt and Merge Matrices for Residuals
+cor_melt_res <- melt(kendall_cor_res, varnames = c("Var1", "Var2"), value.name = "Correlation")
+p_melt_res   <- melt(kendall_p_res, varnames = c("Var1", "Var2"), value.name = "PValue")
+combined_res <- merge(cor_melt_res, p_melt_res, by = c("Var1", "Var2"))
+combined_res$PValue <- round(combined_res$PValue, 2)
+# Keep only lower triangle to avoid duplicates
+combined_res <- subset(combined_res, 
+                       as.numeric(factor(Var1, levels = colnames(df_res))) >
+                         as.numeric(factor(Var2, levels = colnames(df_res))))
+
+### 4. Plot the Kendall Correlation Matrix for Residuals
+p_res <- ggplot(combined_res, aes(x = Var1, y = Var2)) +
+  geom_tile(aes(fill = Correlation), color = "white") +
+  geom_text(aes(label = paste0("τ = ", sprintf("%.2f", Correlation),
+                               "\np = ", sprintf("%.2f", PValue))), size = 3.5) +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0, limits = c(-1, 1), name = "Correlation") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5, size = 12),
+        axis.text.y = element_text(size = 12),
+        plot.title = element_text(hjust = 0.5, face = "bold", size = 16),
+        legend.title = element_text(size = 12),
+        legend.text = element_text(size = 10)) +
+  labs(x = "", y = "")
+
+### 5. Prepare Data for Predicted Values Correlation Matrix
+pred_vars <- c("pred_inc", "pred_NDVIc", "pred_EVI2c", "pred_GVMIc", "pred_NDWIc", 
+               "pred_NDVIp", "pred_EVI2p", "pred_GVMIp", "pred_NDWIp")
+df_pred <- final_df %>% 
+  select(all_of(pred_vars)) %>% 
+  mutate(across(everything(), as.numeric))
+
+#Rename the variables for final plot
+df_pred <- df_pred %>%
+  rename(Presence=pred_inc, NDVIc = pred_NDVIc,  EVI2c = pred_EVI2c, GVMIc = pred_GVMIc, NDWIc = pred_NDWIc, NDVIp = pred_NDVIp,  EVI2p = pred_EVI2p, GVMIp = pred_GVMIp, NDWIp = pred_NDWIp)
+
+
+### 6. Compute Kendall Correlation Matrix for Predicted Values
+kendall_cor_pred <- cor(df_pred, method = "kendall", use = "complete.obs")
+kendall_p_pred <- get_p_values(df_pred)
+
+### 7. Melt and Merge Matrices for Predicted Values
+cor_melt_pred <- melt(kendall_cor_pred, varnames = c("Var1", "Var2"), value.name = "Correlation")
+p_melt_pred   <- melt(kendall_p_pred, varnames = c("Var1", "Var2"), value.name = "PValue")
+combined_pred <- merge(cor_melt_pred, p_melt_pred, by = c("Var1", "Var2"))
+combined_pred$PValue <- round(combined_pred$PValue, 2)
+# Keep only lower triangle
+combined_pred <- subset(combined_pred,
+                        as.numeric(factor(Var1, levels = colnames(df_pred))) >
+                          as.numeric(factor(Var2, levels = colnames(df_pred))))
+
+### 8. Plot the Kendall Correlation Matrix for Predicted Values
+p_pred <- ggplot(combined_pred, aes(x = Var1, y = Var2)) +
+  geom_tile(aes(fill = Correlation), color = "white") +
+  geom_text(aes(label = paste0("τ = ", sprintf("%.2f", Correlation),
+                               "\np = ", sprintf("%.2f", PValue))), size = 3.5) +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0, limits = c(-1, 1), name = "Correlation") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5, size = 12),
+        axis.text.y = element_text(size = 12),
+        plot.title = element_text(hjust = 0.5, face = "bold", size = 16),
+        legend.title = element_text(size = 12),
+        legend.text = element_text(size = 10)) +
+  labs( x = "", y = "")
+
+### 9. Display the Plots
+plot(p_res)
+plot(p_pred)
+
+
+#### END ####
+
+```
+

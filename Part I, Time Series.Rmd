@@ -1,0 +1,465 @@
+---
+title: "Part I: Time Series"
+author: "María Escobar-González"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 6
+    toc_float: true
+    collapsed: true
+    smooth_scroll: true
+    highlight: kate
+    theme: journal 
+    df_print: paged
+    code_folding: show
+date: "2025-07-10"
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+
+
+# Helper function: Create a time series object
+prepare_ts_data <- function(data, index_column) {
+  data$Year  <- as.numeric(as.character(data$Year))
+  data$Month <- as.numeric(as.character(data$Month))
+  
+  ts(data[[index_column]],
+     start = c(min(data$Year), min(data$Month)),
+     frequency = 12)
+}
+
+```
+
+
+```{r message=FALSE, warning=FALSE}
+#packages
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(conflicted)
+library(bfast)
+library(zoo)
+library(lubridate)  # For easier date handling
+library(corrplot)
+library(Hmisc)
+library(GGally)
+library(reshape2)
+library(rmarkdown)
+```
+
+
+## Dataframe
+```{r message=FALSE, warning=FALSE, rows.print = 24}
+incidences <- read.delim(file = "ts_incidences.txt", header = TRUE, sep = "\t", dec = ".")
+incidences
+
+# Vegetation Indices (VI), from CNP
+load("cnp_lin_interpol.RData")  # cnp
+cnp
+
+# Vegetation Indices (VI) from  urban parks
+load("park_lin_interpol.RData") # park
+park
+
+
+# Missing values are a problem for TS. Therefore, we have to predict missing data by linear interpolation of adjacent values or use BFAST-Lite.
+
+cnp[, 3:ncol(cnp)] <- lapply(cnp[, 3:ncol(cnp)], function(x) round(na.approx(x, na.rm = FALSE), 2))
+park[, 3:ncol(park)] <- lapply(park[, 3:ncol(park)], function(x) round(na.approx(x, na.rm = FALSE), 2))
+
+cnp
+park
+
+#Check if there are any NA
+any(is.na(cnp))
+any(is.na(park))
+
+
+```
+
+## Time Series CNP
+```{r message=FALSE, warning=FALSE , rows.print = 24}
+
+  #1. NDVI
+  ts_NDVIc <- prepare_ts_data(cnp, "mean_NDVI")
+  # Plotting the Time Series
+  plot(ts_NDVIc, main="Monthly Mean NDVI for CNP", 
+       ylab="Mean NDVI", xlab="Year")
+  # STL Decomposition (Seasonal-Trend decomposition using LOESS)
+  stl_NDVIc <- stl(ts_NDVIc, s.window = "periodic")
+  plot(stl_NDVIc, main="STL Decomposition of Mean NDVI for CNP")
+  # Applying BFAST to detect breaks
+  fit_NDVIc <- bfast(ts_NDVIc, h = 1/8, season = "harmonic", max.iter = 10)
+  plot(fit_NDVIc, main="BFAST Break Detection for Mean NDVI in CNP", ANOVA=TRUE)  # ANOVA=TRUE returns the slope and p for each segment
+  
+  # Output the BFAST results for inspection
+  fit_NDVIc
+ 
+  #magnitude
+  fit_NDVIc[5]
+```  
+
+
+```{r message=FALSE, warning=FALSE , rows.print = 24}
+
+  #2.  EVI2
+ ts_EVI2c <- prepare_ts_data(cnp, "mean_EVI2")
+# Plotting the Time Series
+  plot(ts_EVI2c, main="Monthly Mean EVI2 for CNP", 
+       ylab="Mean EVI2", xlab="Year")
+
+  # STL Decomposition (Seasonal-Trend decomposition using LOESS)
+  stl_EVI2c <- stl(ts_EVI2c, s.window = "periodic")
+  plot(stl_EVI2c, main="STL Decomposition of Mean EVI2 for CNP")
+
+  # Applying BFAST to detect breaks
+  fit_EVI2c <- bfast(ts_EVI2c, h = 1/8, season = "harmonic", max.iter = 10)
+  plot(fit_EVI2c, main="BFAST Break Detection for Mean EVI2 in CNP", ANOVA=TRUE)
+# Output the BFAST results for inspection
+  fit_EVI2c
+  
+#  intercept [2] -  magnitude [3]
+  fit_EVI2c[5]
+
+    
+``` 
+
+
+```{r message=FALSE, warning=FALSE , rows.print = 24, hide=TRUE}
+
+#3. GVMI
+    ts_GVMIc <- prepare_ts_data(cnp, "mean_GVMI")
+# Plotting the Time Series
+  plot(ts_GVMIc, main="Monthly Mean GVMI for CNP", 
+       ylab="Mean GVMI", xlab="Year")
+# STL Decomposition (Seasonal-Trend decomposition using LOESS)
+  stl_GVMIc <- stl(ts_GVMIc, s.window = "periodic")
+  plot(stl_GVMIc, main="STL Decomposition of Mean GVMI for CNP")
+# Applying BFAST to detect breaks
+  fit_GVMIc <- bfast(ts_GVMIc, h = 1/8, season = "harmonic", max.iter = 10)
+  plot(fit_GVMIc, main="BFAST Break Detection for Mean GVMI in CNP", ANOVA=TRUE)
+# Output the BFAST results for inspection
+  fit_GVMIc
+#  intercept [2] -  magnitude [3]
+  fit_GVMIc[5]
+```  
+  
+```{r message=FALSE, warning=FALSE , rows.print = 24, hide=TRUE}
+
+# 4. NDWI
+  ts_NDWIc <- prepare_ts_data(cnp, "mean_NDWI")
+  # Plotting the Time Series
+  plot(ts_NDWIc, main="Monthly Mean NDWI for CNP", 
+       ylab="Mean NDWI", xlab="Year")
+  # STL Decomposition (Seasonal-Trend decomposition using LOESS)
+  stl_NDWIc <- stl(ts_NDWIc, s.window = "periodic")
+  plot(stl_NDWIc, main="STL Decomposition of Mean NDWI for CNP")
+  # Applying BFAST to detect breaks
+  fit_NDWIc <- bfast(ts_NDWIc, h = 1/8, season = "harmonic", max.iter = 10)
+  plot(fit_NDWIc, main="BFAST Break Detection for Mean NDWI in CNP", ANOVA=TRUE)
+  # Output the BFAST results for inspection
+  fit_NDWIc
+  #  intercept [2] -  magnitude [3]
+  fit_NDWIc[5]
+  
+``` 
+
+
+
+## Time Series Urban parks
+```{r message=FALSE, warning=FALSE , rows.print = 24, results='hide'}
+
+#1. NDVI
+  ts_NDVIp <- prepare_ts_data(park, "mean_NDVI")
+  # Plotting the Time Series
+  plot(ts_NDVIp, main="Monthly Mean NDVI for Parks", 
+       ylab="Mean NDVI", xlab="Year")
+  # STL Decomposition (Seasonal-Trend decomposition using LOESS)
+  stl_NDVIp <- stl(ts_NDVIp, s.window = "periodic")
+  plot(stl_NDVIp, main="STL Decomposition of Mean NDVI for Parks")
+  # Applying BFAST to detect breaks
+  fit_NDVIp <- bfast(ts_NDVIp, h = 1/8, season = "harmonic", max.iter = 10)
+  plot(fit_NDVIp, main="BFAST Break Detection for Mean NDVI in Parks", ANOVA=TRUE)
+  # Output the BFAST results for inspection
+  fit_NDVIp
+  #  intercept [2] -  magnitude [3]
+  fit_NDVIp[5]
+  
+```   
+
+
+```{r message=FALSE, warning=FALSE , rows.print = 24, results='hide'}
+
+#2. EVI2
+  ts_EVI2p <- prepare_ts_data(park, "mean_EVI2")
+  # Plotting the Time Series
+  plot(ts_EVI2p, main="Monthly Mean EVI2 for Parks", 
+       ylab="Mean EVI2", xlab="Year")
+  # STL Decomposition (Seasonal-Trend decomposition using LOESS)
+  stl_EVI2p <- stl(ts_EVI2p, s.window = "periodic")
+  plot(stl_EVI2p, main="STL Decomposition of Mean EVI2 for Parks")
+  # Applying BFAST to detect breaks
+  fit_EVI2p <- bfast(ts_EVI2p, h = 1/8, season = "harmonic", max.iter = 10)
+  plot(fit_EVI2p, main="BFAST Break Detection for Mean EVI2 in Parks", ANOVA=TRUE)
+  # Output the BFAST results for inspection
+  fit_EVI2p
+  #  intercept [2] -  magnitude [3]
+  fit_EVI2p[5]
+```   
+  
+```{r message=FALSE, warning=FALSE , rows.print = 24, results='hide'}
+
+#3. GVMI
+  ts_GVMIp <- prepare_ts_data(park, "mean_GVMI")
+  # Plotting the Time Series
+  plot(ts_GVMIp, main="Monthly Mean GVMI for Parks", 
+       ylab="Mean GVMI", xlab="Year")
+  # STL Decomposition (Seasonal-Trend decomposition using LOESS)
+  stl_GVMIp <- stl(ts_GVMIp, s.window = "periodic")
+  plot(stl_GVMIp, main="STL Decomposition of Mean GVMI for Parks")
+  # Applying BFAST to detect breaks
+  fit_GVMIp <- bfast(ts_GVMIp, h = 1/8, season = "harmonic", max.iter = 10)
+  plot(fit_GVMIp, main="BFAST Break Detection for Mean GVMI in Parks", ANOVA=TRUE)
+  # Output the BFAST results for inspection
+  fit_GVMIp
+  #  intercept [2] -  magnitude [3]
+  fit_GVMIp[5]
+```  
+  
+```{r message=FALSE, warning=FALSE , rows.print = 24, results='hide'}
+
+#4. NDWI
+  ts_NDWIp <- prepare_ts_data(park, "mean_NDWI")
+  # Plotting the Time Series
+  plot(ts_NDWIp, main="Monthly Mean NDWI for Parks", 
+       ylab="Mean NDWI", xlab="Year")
+  # STL Decomposition (Seasonal-Trend decomposition using LOESS)
+  stl_NDWIp <- stl(ts_NDWIp, s.window = "periodic")
+  plot(stl_NDWIp, main="STL Decomposition of Mean NDWI for Parks")
+  # Applying BFAST to detect breaks
+  fit_NDWIp <- bfast(ts_NDWIp, h = 1/8, season = "harmonic", max.iter = 10)
+  plot(fit_NDWIp, main="BFAST Break Detection for Mean NDWI in Parks", ANOVA=TRUE)
+  # Output the BFAST results for inspection
+  fit_NDWIp
+  #  intercept [2] -  magnitude [3]
+  fit_NDWIp[5]
+```
+
+
+## Time Series Wild boar urban presence
+```{r message=FALSE, warning=FALSE , rows.print = 24, results='hide'}
+
+
+    ts_incid <- prepare_ts_data(incidences, "Incidence")
+  # Plotting the Time Series
+  plot(ts_incid, main="Monthly incidences", 
+       ylab="Number of WB incidences", xlab="Year")
+  # STL Decomposition (Seasonal-Trend decomposition using LOESS)
+  stl_incid <- stl(ts_incid, s.window = "periodic")
+  plot(stl_incid, main="STL Decomposition of WB incidences")
+  # Applying BFAST to detect breaks
+  fit_incid <- bfast(ts_incid, h = 1/8, season = "harmonic", max.iter = 10)
+  plot(fit_incid, main="BFAST Break Detection for number of incidences", ANOVA=TRUE)
+  # Output the BFAST results for inspection
+  fit_incid
+  #  intercept [2] -  magnitude [3]
+  fit_incid[5]
+  
+```
+
+
+
+## Relationship long-term trends
+```{r message=FALSE, warning=FALSE , rows.print = 24, results='hide'}
+
+# 1. Extract predicted values
+  
+# Define a list with information for each series: Each list element contains the time series object name and the corresponding BFAST fit object name.
+  series_info <- list(
+    incid  = list(ts = "ts_incid",  fit = "fit_incid"),
+    NDVIc  = list(ts = "ts_NDVIc",  fit = "fit_NDVIc"),
+    EVI2c  = list(ts = "ts_EVI2c",  fit = "fit_EVI2c"),
+    GVMIc  = list(ts = "ts_GVMIc",  fit = "fit_GVMIc"),
+    NDWIc  = list(ts = "ts_NDWIc",  fit = "fit_NDWIc"),
+    NDVIp  = list(ts = "ts_NDVIp",  fit = "fit_NDVIp"),
+    EVI2p  = list(ts = "ts_EVI2p",  fit = "fit_EVI2p"),
+    GVMIp  = list(ts = "ts_GVMIp",  fit = "fit_GVMIp"),
+    NDWIp  = list(ts = "ts_NDWIp",  fit = "fit_NDWIp"))
+  
+  # Initialize an empty list to store the individual trend data frames
+  trend_list <- list()
+  
+  for(series in names(series_info)) {
+    # Retrieve the time series and BFAST objects from the environment using their names
+    ts_obj  <- get(series_info[[series]]$ts)
+    fit_obj <- get(series_info[[series]]$fit)
+    
+    # Extract the final iteration from the BFAST output
+    niter <- length(fit_obj$output)
+    final_iter <- fit_obj$output[[niter]]
+    
+    # Extract the trend component (Tt)
+    trend_values <- final_iter$Tt
+    
+    # Get the time indices from the time series
+    time_index <- time(ts_obj)
+    
+    # Create a temporary data frame with Date and the trend values rounded to three decimals
+    df_temp <- data.frame(
+      Date = as.Date(as.yearmon(time_index)),
+      value = round(as.numeric(trend_values), 3)
+    )
+    # Rename the trend column to the desired series name (e.g., NDVIc, NDVIp, etc.)
+    names(df_temp)[2] <- series
+    
+    # Store in the list
+    trend_list[[series]] <- df_temp
+  }
+  
+  # Merge all individual data frames by Date
+  df_trend <- Reduce(function(x, y) merge(x, y, by = "Date", all = TRUE), trend_list)
+  
+  # Preview the final data frame
+  head(df_trend)
+  
+
+  
+```
+
+```{r message=FALSE, warning=FALSE , rows.print = 24, results='hide'}
+
+# 2. Data exploration (predicted values)
+
+  hist(df_trend$incid)
+  hist(df_trend$NDVIc)
+  hist(df_trend$NDVIp)
+  hist(df_trend$EVI2c)
+  hist(df_trend$EVI2p)
+  hist(df_trend$GVMIc)
+  hist(df_trend$GVMIp)
+  hist(df_trend$NDWIc)
+  hist(df_trend$NDWIp)
+ 
+```
+
+```{r message=FALSE, warning=FALSE , rows.print = 24, results='hide'}
+#3. Kendall correlation matrix with p values (we choose Kendall due to numerous ties in our trend data)  
+
+#Define custom variable names for publication, matching the final df_trend columns
+  variable_names <- c(
+    "incid"  = "Presence",
+    "NDVIc"  = "NDVIc",
+    "EVI2c"  = "EVI2c",
+    "GVMIc"  = "GVMIc",
+    "NDWIc"  = "NDWIc",
+    "NDVIp"  = "NDVIp",
+    "EVI2p"  = "EVI2p",
+    "GVMIp"  = "GVMIp",
+    "NDWIp"  = "NDWIp")
+  
+  
+# 1. Prepare the data: exclude Date and rename "incid" to "Presence"
+  df_numeric <- df_trend[, -1]
+  names(df_numeric)[names(df_numeric) == "incid"] <- "Presence"
+  
+# 2. Compute Kendall correlation matrix
+  kendall_cor <- cor(df_numeric, method = "kendall", use = "complete.obs")
+  
+# 3. Define a function to compute the p-value matrix for Kendall correlations
+  get_p_values <- function(data) {
+    n <- ncol(data)
+    p_mat <- matrix(NA, n, n)
+    for(i in 1:n) {
+      for(j in 1:n) {
+        if(i != j) {
+          p_mat[i, j] <- cor.test(data[, i], data[, j], method = "kendall", use = "complete.obs")$p.value
+        }
+      }
+    }
+    colnames(p_mat) <- colnames(data)
+    rownames(p_mat) <- colnames(data)
+    return(p_mat)
+  }
+  kendall_p <- get_p_values(df_numeric)
+  
+# 4. Melt the correlation and p-value matrices and merge them
+  cor_melt <- melt(kendall_cor)
+  p_melt <- melt(kendall_p)
+  colnames(cor_melt) <- c("Var1", "Var2", "Correlation")
+  colnames(p_melt) <- c("Var1", "Var2", "PValue")
+  combined <- merge(cor_melt, p_melt, by = c("Var1", "Var2"))
+  
+# Plot only the lower triangle (to avoid duplicate info)
+  combined <- subset(combined, as.numeric(factor(Var1, levels = colnames(df_numeric))) >
+                       as.numeric(factor(Var2, levels = colnames(df_numeric)))
+  )
+  combined$PValue <- round(combined$PValue, 2)
+  
+# 5. Create the final correlation matrix plot
+  ggplot(combined, aes(x = Var1, y = Var2)) +
+    geom_tile(aes(fill = Correlation), color = "white") +
+    geom_text(aes(label = paste0("τ = ", sprintf("%.2f", Correlation), "\np = ", sprintf("%.2f", PValue))),
+              size = 3.5, fontface = "plain") +
+    scale_fill_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0,
+                         limits = c(-1, 1), name = "Correlation") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 0, hjust = 0.5, size = 12),
+          axis.text.y = element_text(size = 12),
+          plot.title = element_text(hjust = 0.5, face = "bold", size = 16),
+          legend.title = element_text(size = 12),
+          legend.text = element_text(size = 10)) +
+    labs( x = "", y = "")
+```
+
+
+## Linear model
+
+```{r message=FALSE, warning=FALSE , rows.print = 24}
+library(lmtest)
+library(sandwich)
+  
+  # Define predictor variables (VI trends from CNP and parks)
+predictors <- c("EVI2c", "EVI2p", "GVMIc", "GVMIp", "NDVIc", "NDVIp", "NDWIc", "NDWIp")
+  
+  
+# Initialize a results data frame
+  results_list <- list()
+  
+# Loop through each predictor and fit a model
+  for (var in predictors) {
+    # Define the formula: incidences ~ VI trend
+    formula <- as.formula(paste("incid ~", var))
+    
+# Fit the linear model
+    model <- lm(formula, data = df_trend)
+    
+# Apply Newey-West robust standard errors
+    nw_test <- coeftest(model, vcov = NeweyWest(model))
+    
+# Store results
+    results_list[[var]] <- data.frame(
+      Predictor = var,
+      Estimate = nw_test[2, 1],  # Slope (effect size)
+      Std_Error = nw_test[2, 2], # Standard Error
+      t_Value = nw_test[2, 3],   # t-statistic
+      P_Value = nw_test[2, 4]    # P-value
+    )
+  }
+  
+# Combine results into a single data frame
+  results_df <- do.call(rbind, results_list)
+  
+# Print the results
+  print(results_df)
+  
+# OPTIONAL: Sort by p-value to highlight the most significant relationships
+  results_df <- results_df[order(results_df$P_Value), ]
+  print(results_df)  
+  
+  
+  ### END ###
+  
+```
+  

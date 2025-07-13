@@ -1,0 +1,289 @@
+---
+title: "Part III: PLSR"
+author: "María Escobar-González"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 6
+    toc_float: true
+    collapsed: true
+    smooth_scroll: true
+    highlight: kate
+    theme: journal 
+    df_print: paged
+    code_folding: show
+date: "2025-07-10"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+```
+
+```{r}
+###### PART III: PLSR ########
+# loading packages
+
+library(lattice)# conditional plots
+library(gplots)# mean plots
+library(ggplot2)# beautiful plots
+library(grid)
+library(corrgram)# correlation panels
+library(corrplot)# plotting correlations
+library(FactoMineR)# Multivariate analysis
+library(factoextra)# Multivariate analysis
+library(missMDA)
+library(RColorBrewer)# color palette
+library(Hmisc) # Miscellaneous analysis
+library(scatterplot3d)# 3D graphics
+library(plsdepot)# For PLSR
+library(plspm) # path pls
+```
+
+## Load and explore the dataset
+```{r}
+
+load("Bd.RData")
+attach(Bd)
+summary(Bd)
+names(Bd)
+View(Bd) 
+
+
+
+#### :: EXPLORATORY PLOTS :: ####
+hist(log(n_incid))
+hist(dist_cnp)
+hist(log(dist_cnp))
+hist(mean_GVMI)
+hist(mean_NDVI)
+hist(mean_EVI2)
+hist(mean_NDWI)
+```
+
+## Variables transformation
+```{r}
+#Log transform
+Bd$logIncid=log10(n_incid+1)
+Bd$logdist_cnp=log10(dist_cnp+1)
+Bd$logdist_str=log10(dist_str) 
+Bd$logarea_buf=log10(area_buffer) 
+Bd$logstreet=log10(street_length)
+Bd$loginters=log10(intersec_n)
+Bd$logpatch=log10(patch_n) 
+Bd$logedge=log10(edge_length)
+Bd$logmpci=log10(mpci)
+Bd$logmld=log10(mld)
+
+
+#Log transformation to ensure that RS-VI have only positive values (>0)
+
+#GVMI
+min_value <- min(Bd$mean_GVMI, na.rm = TRUE)
+Bd$logGVMI <- log10(Bd$mean_GVMI - min_value + 1)
+
+#NDWI
+min_value <- min(Bd$mean_NDWI, na.rm = TRUE)
+Bd$logNDWI <- log10(Bd$mean_NDWI - min_value + 1)
+
+#EVI2
+min_value <- min(Bd$mean_EVI2, na.rm = TRUE)
+Bd$logEVI <- log10(Bd$mean_EVI2 - min_value + 1)
+```
+
+## Variability in the number incidences
+```{r}
+#Variability in the number incidences (wild boar presence) by urban park (within the 1 km buffer): 
+
+#1. Temporal evolution of incidences by park. It is a messy plot, but gives an idea of the interannual variability of each park:
+
+okabe_ito_extended <- c(
+  "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", 
+  "#D55E00", "#CC79A7", "#999999",
+  "#E6194B", "#3CB44B", "#0082C8", "#F58231", "#911EB4",
+  "#46F0F0", "#FC8D62", "#D2F53C", "#FABEBE", "#008080",
+  "#E6BEFF", "#AA6E28"
+)
+
+#LinePlot
+
+ggplot(Bd, aes(x = Year, y = n_incid, color = Park, group = Park)) +
+  geom_line() +
+  geom_point() +
+  scale_shape_manual(values = c(16, 17, 15, 3, 4, 8, 1, 2, 0, 5, 6, 7, 9, 10, 11, 12, 13, 14, 18, 19)) +
+  labs(title = "Temporal Evolution of Incidences in Selected Parks",
+       x = "Year",
+       y = "Number of Incidences",
+       color = "Park",
+       linetype = "Park",
+       shape = "Park") +
+  theme_minimal() +
+  theme(legend.position = "right",
+        plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+        axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+#Conditional boxplots: Number of wild boar incidences by park
+ggplot(Bd, aes(x = reorder(Park, n_incid, FUN = median), y = n_incid)) +
+  geom_boxplot(
+    outlier.shape = 16,
+    outlier.size = 2,
+    fill = "white",
+    color = "black",
+    size = 0.5  
+  ) +
+  coord_flip() +
+  labs(
+    x = "Park",
+    y = "Wild boar urban presence"
+  ) +
+  theme_bw(base_size = 12) +
+  theme(
+    plot.title = element_text(hjust = 0.5,  size = 16),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    axis.text.y = element_text(size = 11),
+    axis.text.x = element_text(size = 11),
+    panel.background = element_rect(fill = "gray95", color = NA),
+    panel.grid.major = element_line(color = "white"),
+    panel.grid.minor = element_line(color = "white")
+  )
+
+
+#Conditional boxplots: Number of wild boar incidences by year
+ggplot(Bd, aes(x = factor(Year, levels = sort(unique(Year))), y = n_incid)) +
+  geom_boxplot(
+    outlier.shape = 16,
+    outlier.size = 2,
+    fill = "white",
+    color = "black",
+    size = 0.5  # Boxplot border and whisker thickness
+  ) +
+  labs(
+    x = "Year",
+    y = "Wild boar urban presence"
+  ) +
+  theme_bw(base_size = 12) +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    axis.text.x = element_text(size = 11),
+    axis.text.y = element_text(size = 11),
+    panel.background = element_rect(fill = "gray95", color = NA),
+    panel.grid.major = element_line(color = "white"),
+    panel.grid.minor = element_line(color = "white")
+  )
+
+
+
+
+# Relationships between explanatory and response variables
+Bd$Year <- as.factor(Bd$Year)  
+Bd <- Bd[order(Bd$Year), ]
+
+# Define the list of variables to exclude
+exclude_vars <- c("Park", "X", "Y", "n_incid_MN", "incid_d_MN")
+
+# Get all column names from the data frame Bd
+all_vars <- names(Bd)
+
+# Exclude variables that are in the exclude list
+vars_to_check <- setdiff(all_vars, exclude_vars)
+
+# Further remove variables that end with "_d" (density variables)
+vars_to_check <- vars_to_check[!grepl("_d$", vars_to_check)]
+
+# Remove the response variable 'logIncid' from predictors
+predictor_vars <- setdiff(vars_to_check, "logIncid")
+
+# Loop through each predictor and generate a scatterplot vs. logIncid
+for (var in predictor_vars) {
+  p <- ggplot(Bd, aes_string(x = var, y = "logIncid")) +
+    geom_point(alpha = 0.6) +
+    geom_smooth(method = "lm", se = TRUE, color = "blue") +
+    labs(x = var,
+         y = "Log(n_incid)",
+         title = paste("Relationship between", var, "and Log(n_incid)")) +
+    theme_minimal()
+  
+  print(p)  # Print each plot individually
+}
+```
+
+## PLSR with a single  Y' factor
+
+```{r}
+# PLSR Analysis
+
+# Convert Year to numeric (if not already)
+Bd$Year <- as.numeric(Bd$Year)
+
+# Explanatory variables
+X <- subset(Bd, select = c("logdist_str","logarea_buf","logstreet","loginters",
+                           "logpatch","logedge","logmpci", "logmld","logGVMI", 
+                           "logNDWI", "logEVI", "Year"))
+
+# Response variable
+Y <- subset(Bd, select = c("logIncid"))
+
+# Summaries
+summary(X)
+summary(Y)
+
+# Fit PLS regression with 2 components
+modelpls1 <- plsreg1(X, Y, comps = 2)
+
+# View model summary and key outputs
+print(modelpls1)
+head(modelpls1$x.scores)   # X components
+head(modelpls1$y.scores)   # Y components
+modelpls1$reg.coefs        # Regression coefficients
+modelpls1$R2               # R-squared values
+modelpls1$Q2               # Q2 statistic
+modelpls1$x.loads          # X loadings
+modelpls1$cor.xyt          # Correlations between variables and components
+
+# Plot PLS model (circle of correlations)
+plot(modelpls1)
+
+# Extract first component scores
+X_scores <- modelpls1$x.scores[, 1]
+Y_scores <- modelpls1$y.scores[, 1]
+
+# Linear regression between first components
+reg <- lm(Y_scores ~ X_scores)
+summary(reg)
+```
+
+
+```{r}
+# Diagnostic plots
+par(mfrow = c(2, 2))
+plot(reg)
+par(mfrow = c(1, 1))  # reset plotting layout
+
+# Plot scores with confidence intervals
+CI <- predict(reg, interval = "confidence")
+plot(X_scores, Y_scores, ylab = "PLSR Y's component", xlab = "PLSR X's component")
+abline(reg, col = "grey")
+lines(X_scores, CI[, "lwr"], col = "blue", lty = "dashed")
+lines(X_scores, CI[, "upr"], col = "blue", lty = "dashed")
+
+# Observed vs predicted values
+predicted_values <- modelpls1$y.pred
+observed_values <- Bd$logIncid
+
+plot(observed_values, predicted_values, type = "n",
+     xlab = "Original (Observed)", ylab = "Predicted",
+     main = "Comparison of Responses")
+abline(a = 0, b = 1, col = "gray85", lwd = 2)
+text(observed_values, predicted_values, labels = round(predicted_values, 2), col = "#5592e3")
+
+
+#### END ####
+
+
+
+```
+
